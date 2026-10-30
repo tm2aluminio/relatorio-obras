@@ -180,6 +180,17 @@
     padding:10px; border-radius:var(--radius); font-size:13.5px; cursor:pointer;
   }
 
+  .vid-thumb{background:#1c2733;}
+  .vid-play{position:absolute; left:50%; top:46%; transform:translate(-50%,-50%); width:40px; height:40px; border-radius:50%;
+    border:none; background:rgba(0,0,0,.62); color:#fff; font-size:16px; cursor:pointer; padding:0 0 0 3px;}
+  .vid-dur{position:absolute; left:4px; top:4px; background:rgba(0,0,0,.62); color:#fff; font-size:11px; padding:1px 6px; border-radius:3px;}
+  .vid-note{font-size:12px; color:var(--muted,#667); margin:4px 0 0;}
+  .player-ov{position:fixed; inset:0; background:rgba(0,0,0,.88); z-index:80; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; padding:16px; gap:12px;}
+  .player-ov video{max-width:100%; max-height:75vh; background:#000; border-radius:6px;}
+  .player-ov .player-msg{color:#fff; font-size:14px; text-align:center; max-width:420px;}
+  .player-ov button{border:none; background:#fff; color:#111; padding:10px 22px; border-radius:6px; font-size:14px; font-weight:600; cursor:pointer;}
+
   .acao-card{
     border:1px solid var(--line-strong); border-left:4px solid var(--amber); border-radius:var(--radius);
     padding:12px; margin-top:12px; background:var(--paper);
@@ -253,8 +264,8 @@
 
 <nav class="toolbar">
   <button id="btnNovo" type="button">+ Novo relatório</button>
-  <button id="btnCarregar" type="button">Carregar relatório (.json)</button>
-  <input type="file" id="fileInput" accept="application/json,.json" hidden>
+  <button id="btnCarregar" type="button">Carregar relatório (.json ou .zip)</button>
+  <input type="file" id="fileInput" accept="application/json,.json,.zip,application/zip,application/x-zip-compressed" hidden>
 </nav>
 
 <div id="resumeBanner" class="banner hidden">
@@ -320,6 +331,8 @@
     <p class="help" style="margin-top:-4px; margin-bottom:14px;">Cada ponto tem sua própria descrição, fotos e item de ação.</p>
     <input type="file" id="inputFotoCamera" accept="image/*" capture="environment" hidden>
     <input type="file" id="inputFotoGaleria" accept="image/*" multiple hidden>
+    <input type="file" id="inputVideoCamera" accept="video/*" capture="environment" hidden>
+    <input type="file" id="inputVideoGaleria" accept="video/*" multiple hidden>
     <div id="pontosList"></div>
     <button class="add-btn" id="btnAddPonto" type="button">+ Adicionar ponto a ser trabalhado</button>
   </section>
@@ -367,7 +380,13 @@
   </div>
 </div>
 
+<div id="playerOv" class="player-ov hidden" role="dialog" aria-modal="true" aria-label="Reprodução de vídeo">
+  <video id="playerVideo" controls playsinline></video>
+  <div id="playerMsg" class="player-msg hidden"></div>
+  <button id="playerClose" type="button">Fechar</button>
+</div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script>
 (function(){
 "use strict";
@@ -411,12 +430,28 @@ async function saveFile(filename, blob){
 function uid(){ return Math.random().toString(36).slice(2,10); }
 function todayISO(){ var d=new Date(); return d.getFullYear()+"-"+pad2(d.getMonth()+1)+"-"+pad2(d.getDate()); }
 function pad2(n){ return String(n).padStart(2,"0"); }
+/* data/hora SEMPRE no fuso do aparelho (Brasília no celular da equipe) — nunca em UTC */
+function localStamp(){ var d=new Date(); return todayISO()+"T"+pad2(d.getHours())+":"+pad2(d.getMinutes()); }
+function stampLocalParts(s){
+  if (!s) return null;
+  if (/(Z|[+-]\d\d:?\d\d)$/.test(s)){           /* registros antigos gravados em UTC */
+    var d = new Date(s); if (isNaN(d.getTime())) return null;
+    return { date: d.getFullYear()+"-"+pad2(d.getMonth()+1)+"-"+pad2(d.getDate()), time: pad2(d.getHours())+":"+pad2(d.getMinutes()) };
+  }
+  return { date: s.slice(0,10), time: s.slice(11,16) };
+}
+function fmtStampBR(s, onlyDate){
+  var q = stampLocalParts(s); if (!q) return "—";
+  var t = formatDateBR(q.date);
+  return (onlyDate || !q.time) ? t : t + " às " + q.time;
+}
 
 function newPonto(){
   return {
     id: uid(),
     texto: "",
     imagens: [],
+    videos: [],
     acao: { acaoNecessaria:"", resultadoEsperado:"", responsavel:"", prazo:"" }
   };
 }
@@ -531,6 +566,7 @@ function renderParticipantes(){
 function renderPontos(){
   var wrap = document.getElementById("pontosList");
   wrap.innerHTML = "";
+  state.pontos.forEach(function(p){ if (!p.videos) p.videos = []; if (!p.imagens) p.imagens = []; });
   state.pontos.forEach(function(p, i){
     var card = document.createElement("div");
     card.className = "ponto-card";
@@ -545,6 +581,18 @@ function renderPontos(){
         '</div>';
     });
 
+    var vidsHtml = "";
+    p.videos.forEach(function(v, j){
+      vidsHtml +=
+        '<div class="img-thumb vid-thumb">' +
+        '<img src="'+v.poster+'" alt="Vídeo '+(j+1)+'">' +
+        '<button class="vid-play" data-playvid="'+i+':'+j+'" type="button" aria-label="Reproduzir vídeo '+(j+1)+'">▶</button>' +
+        '<span class="vid-dur">'+fmtDur(v.duracao)+'</span>' +
+        '<button class="icon-btn" data-rmvid="'+i+':'+j+'" type="button" title="Remover vídeo">✕</button>' +
+        '<input class="cap-input" data-capv="'+i+':'+j+'" type="text" placeholder="legenda" value="'+esc(v.legenda||"")+'">' +
+        '</div>';
+    });
+
     card.innerHTML =
       '<div class="ponto-head"><span>Ponto '+(i+1)+'</span>' +
       '<button class="icon-btn" data-rmponto="'+i+'" type="button" title="Remover ponto">✕</button></div>' +
@@ -555,6 +603,14 @@ function renderPontos(){
       '<button data-fotogal="'+i+'" type="button">🖼 Da galeria</button>' +
       '</div>' +
       '<div class="img-grid">'+imgsHtml+'</div>' +
+      '</div>' +
+      '<div class="field"><label>Vídeos</label>' +
+      '<div class="photo-btns">' +
+      '<button data-vidcam="'+i+'" type="button">🎥 Gravar vídeo</button>' +
+      '<button data-vidgal="'+i+'" type="button">🎞 Da galeria</button>' +
+      '</div>' +
+      '<div class="img-grid">'+vidsHtml+'</div>' +
+      '<p class="vid-note">Os vídeos seguem junto com o relatório em arquivos separados. No PDF aparece uma imagem de cada vídeo, com o nome do arquivo.</p>' +
       '</div>' +
       '<div class="acao-card">' +
       '<div class="acao-head"><span>Item de ação</span></div>' +
@@ -600,6 +656,39 @@ function renderPontos(){
       state.pontos[+parts[0]].imagens[+parts[1]].legenda = inp.value;
     });
   });
+  wrap.querySelectorAll("[data-rmvid]").forEach(function(btn){
+    btn.addEventListener("click", function(){
+      var parts = btn.dataset.rmvid.split(":");
+      var v = state.pontos[+parts[0]].videos.splice(+parts[1], 1)[0];
+      if (v) deleteVideoBlob(v.id);
+      renderPontos();
+      applyLock();
+    });
+  });
+  wrap.querySelectorAll("[data-capv]").forEach(function(inp){
+    inp.addEventListener("input", function(){
+      var parts = inp.dataset.capv.split(":");
+      state.pontos[+parts[0]].videos[+parts[1]].legenda = inp.value;
+    });
+  });
+  wrap.querySelectorAll("[data-playvid]").forEach(function(btn){
+    btn.addEventListener("click", function(){
+      var parts = btn.dataset.playvid.split(":");
+      playVideo(state.pontos[+parts[0]].videos[+parts[1]]);
+    });
+  });
+  wrap.querySelectorAll("[data-vidcam]").forEach(function(btn){
+    btn.addEventListener("click", function(){
+      fotoAlvoPontoIndex = +btn.dataset.vidcam;
+      document.getElementById("inputVideoCamera").click();
+    });
+  });
+  wrap.querySelectorAll("[data-vidgal]").forEach(function(btn){
+    btn.addEventListener("click", function(){
+      fotoAlvoPontoIndex = +btn.dataset.vidgal;
+      document.getElementById("inputVideoGaleria").click();
+    });
+  });
   wrap.querySelectorAll("[data-fotocam]").forEach(function(btn){
     btn.addEventListener("click", function(){
       fotoAlvoPontoIndex = +btn.dataset.fotocam;
@@ -633,7 +722,7 @@ function renderStatus(){
     if (state.status === "aprovado"){
       daWrap.classList.remove("hidden");
       apWrap.classList.remove("hidden");
-      document.getElementById("dataAprovacaoField").textContent = state.dataAprovacao ? formatDateBR(state.dataAprovacao.slice(0,10)) + " às " + state.dataAprovacao.slice(11,16) : "—";
+      document.getElementById("dataAprovacaoField").textContent = fmtStampBR(state.dataAprovacao);
       document.getElementById("aprovadoPorField").textContent = state.aprovadoPor || "—";
     } else {
       daWrap.classList.add("hidden");
@@ -642,7 +731,7 @@ function renderStatus(){
     lockBanner.classList.remove("hidden");
     lockBanner.innerHTML = state.status === "aguardando_aprovacao"
       ? "<span>Este relatório está aguardando aprovação. Revise o conteúdo abaixo e use o botão <strong>Aprovar relatório</strong> se estiver de acordo.</span>"
-      : "<span>Relatório aprovado por " + esc(state.aprovadoPor || "—") + " em " + (state.dataAprovacao ? formatDateBR(state.dataAprovacao.slice(0,10)) : "—") + ". Use os botões abaixo para baixar o PDF ou iniciar uma nova revisão.</span>";
+      : "<span>Relatório aprovado por " + esc(state.aprovadoPor || "—") + " em " + fmtStampBR(state.dataAprovacao, true) + ". Use os botões abaixo para baixar o PDF ou iniciar uma nova revisão.</span>";
   }
 
   var btnExportar = document.getElementById("btnExportar");
@@ -763,6 +852,193 @@ document.getElementById("inputFotoGaleria").addEventListener("change", function(
   handleFiles(e.target.files); e.target.value = "";
 });
 
+
+/* ---------------- vídeos ---------------- */
+var MAX_VIDEO_MB = 80, MAX_TOTAL_MB = 250;
+var videoCache = {};   /* id -> Blob (memória) */
+var idbPromise = null;
+function idb(){
+  if (idbPromise) return idbPromise;
+  idbPromise = new Promise(function(resolve){
+    try{
+      var rq = indexedDB.open("tm2_relatorio_videos", 1);
+      rq.onupgradeneeded = function(){ rq.result.createObjectStore("v"); };
+      rq.onsuccess = function(){ resolve(rq.result); };
+      rq.onerror = function(){ resolve(null); };
+    }catch(e){ resolve(null); }
+  });
+  return idbPromise;
+}
+async function putVideoBlob(id, blob){
+  videoCache[id] = blob;
+  var db = await idb(); if (!db) return;
+  try{ db.transaction("v","readwrite").objectStore("v").put(blob, id); }catch(e){}
+}
+async function getVideoBlob(id){
+  if (videoCache[id]) return videoCache[id];
+  var db = await idb(); if (!db) return null;
+  return new Promise(function(resolve){
+    try{
+      var rq = db.transaction("v","readonly").objectStore("v").get(id);
+      rq.onsuccess = function(){ if (rq.result) videoCache[id] = rq.result; resolve(rq.result || null); };
+      rq.onerror = function(){ resolve(null); };
+    }catch(e){ resolve(null); }
+  });
+}
+async function deleteVideoBlob(id){
+  delete videoCache[id];
+  var db = await idb(); if (!db) return;
+  try{ db.transaction("v","readwrite").objectStore("v").delete(id); }catch(e){}
+}
+function fmtDur(sec){
+  sec = Math.round(sec || 0);
+  return Math.floor(sec/60) + ":" + pad2(sec % 60);
+}
+function fmtMB(bytes){ return bytes < 1048576 ? Math.max(1, Math.round(bytes/1024)) + " KB" : (bytes/1048576).toFixed(1).replace(".", ",") + " MB"; }
+function extOf(v){
+  var t = (v.tipo || "").toLowerCase();
+  if (t.indexOf("quicktime") >= 0) return "mov";
+  if (t.indexOf("webm") >= 0) return "webm";
+  if (t.indexOf("3gpp") >= 0) return "3gp";
+  if (t.indexOf("mp4") >= 0) return "mp4";
+  var m = /\.([a-z0-9]{2,4})$/i.exec(v.nome || "");
+  return m ? m[1].toLowerCase() : "mp4";
+}
+function videoFileName(pi, vj, v){
+  var base = computeReportId().replace(/[()]/g,"").replace(/\s+/g,"_");
+  return base + "_P" + (pi+1) + "_V" + (vj+1) + "." + extOf(v);
+}
+function listarVideos(){
+  var out = [];
+  state.pontos.forEach(function(p, pi){ (p.videos||[]).forEach(function(v, vj){ out.push({ pi: pi, vj: vj, v: v }); }); });
+  return out;
+}
+function placeholderPoster(){
+  var c = document.createElement("canvas"); c.width = 640; c.height = 360;
+  var g = c.getContext("2d"); g.fillStyle = "#1c2733"; g.fillRect(0,0,640,360);
+  return { dataUrl: c.toDataURL("image/jpeg", 0.8), width: 640, height: 360, duration: 0 };
+}
+function videoInfo(file){
+  return new Promise(function(resolve){
+    var url = URL.createObjectURL(file);
+    var v = document.createElement("video");
+    v.muted = true; v.playsInline = true; v.preload = "metadata"; v.src = url;
+    var done = false;
+    function finish(res){ if (done) return; done = true; clearTimeout(timer); URL.revokeObjectURL(url); resolve(res); }
+    var timer = setTimeout(function(){ finish(placeholderPoster()); }, 9000);
+    v.onerror = function(){ finish(placeholderPoster()); };
+    v.onloadedmetadata = function(){
+      var dur = (isFinite(v.duration) ? v.duration : 0);
+      try{ v.currentTime = Math.max(0.1, Math.min(1, dur / 2)); }catch(e){ finish(placeholderPoster()); }
+    };
+    v.onseeked = function(){
+      try{
+        var w = v.videoWidth || 640, h = v.videoHeight || 360;
+        var maxW = 800; if (w > maxW){ h = Math.round(h * maxW / w); w = maxW; }
+        var c = document.createElement("canvas"); c.width = w; c.height = h;
+        c.getContext("2d").drawImage(v, 0, 0, w, h);
+        finish({ dataUrl: c.toDataURL("image/jpeg", 0.8), width: w, height: h, duration: isFinite(v.duration) ? v.duration : 0 });
+      }catch(e){ finish(placeholderPoster()); }
+    };
+  });
+}
+async function handleVideos(fileList){
+  if (fotoAlvoPontoIndex === null || !state.pontos[fotoAlvoPontoIndex]) return;
+  var ponto = state.pontos[fotoAlvoPontoIndex];
+  if (!ponto.videos) ponto.videos = [];
+  var files = Array.prototype.slice.call(fileList || []);
+  var total = listarVideos().reduce(function(a, x){ return a + (x.v.tamanho || 0); }, 0);
+  var rejeitados = [];
+  for (var i = 0; i < files.length; i++){
+    var f = files[i];
+    if (f.size > MAX_VIDEO_MB * 1048576){ rejeitados.push(f.name + " (acima de " + MAX_VIDEO_MB + " MB)"); continue; }
+    if (total + f.size > MAX_TOTAL_MB * 1048576){ rejeitados.push(f.name + " (limite total de " + MAX_TOTAL_MB + " MB do relatório)"); continue; }
+    toast("Preparando vídeo " + (i+1) + " de " + files.length + "...");
+    var info = await videoInfo(f);
+    var id = uid();
+    await putVideoBlob(id, f);
+    total += f.size;
+    ponto.videos.push({ id: id, nome: f.name || "video", tipo: f.type || "video/mp4", tamanho: f.size,
+      duracao: info.duration, poster: info.dataUrl, width: info.width, height: info.height, legenda: "" });
+  }
+  renderPontos();
+  applyLock();
+  if (rejeitados.length) toast("Não adicionado: " + rejeitados.join("; ") + ". Grave em qualidade menor ou corte o vídeo.");
+  else if (files.length) toast("Vídeo adicionado. Ele segue em arquivo separado, junto com o relatório.");
+}
+document.getElementById("inputVideoCamera").addEventListener("change", function(e){
+  handleVideos(e.target.files); e.target.value = "";
+});
+document.getElementById("inputVideoGaleria").addEventListener("change", function(e){
+  handleVideos(e.target.files); e.target.value = "";
+});
+
+var playerUrl = null;
+function closePlayer(){
+  var ov = document.getElementById("playerOv"), pv = document.getElementById("playerVideo");
+  try{ pv.pause(); }catch(e){}
+  pv.removeAttribute("src"); pv.load();
+  if (playerUrl){ URL.revokeObjectURL(playerUrl); playerUrl = null; }
+  ov.classList.add("hidden");
+}
+async function playVideo(v){
+  if (!v) return;
+  var ov = document.getElementById("playerOv"), pv = document.getElementById("playerVideo"), msg = document.getElementById("playerMsg");
+  var blob = await getVideoBlob(v.id);
+  ov.classList.remove("hidden");
+  if (!blob){
+    pv.classList.add("hidden"); msg.classList.remove("hidden");
+    msg.textContent = "O arquivo deste vídeo (" + (v.nome || "vídeo") + ") não está neste aparelho. Abra o arquivo .zip enviado com o relatório para carregar os vídeos.";
+    return;
+  }
+  msg.classList.add("hidden"); pv.classList.remove("hidden");
+  playerUrl = URL.createObjectURL(blob);
+  pv.src = playerUrl;
+  pv.play().catch(function(){});
+}
+document.getElementById("playerClose").addEventListener("click", closePlayer);
+document.getElementById("playerOv").addEventListener("click", function(e){ if (e.target === this) closePlayer(); });
+
+/* exporta o relatório: .json simples, ou .zip (json + vídeos) quando há vídeos */
+async function exportarEstado(sufixo){
+  var base = computeReportId() + (sufixo || "");
+  var vids = listarVideos();
+  var json = JSON.stringify(state, null, 2);
+  if (!vids.length){
+    return saveFile(base + ".json", new Blob([json], { type: "application/json" }));
+  }
+  if (!window.JSZip){ toast("Biblioteca de compactação não carregou. Verifique a conexão e tente novamente."); return false; }
+  var zip = new JSZip();
+  zip.file("relatorio.json", json);
+  var faltando = 0;
+  for (var i = 0; i < vids.length; i++){
+    var b = await getVideoBlob(vids[i].v.id);
+    if (b) zip.file("videos/" + vids[i].v.id + "." + extOf(vids[i].v), b, { compression: "STORE" });
+    else faltando++;
+  }
+  var out = await zip.generateAsync({ type: "blob", compression: "STORE" });
+  var ok = await saveFile(base + ".zip", out);
+  if (faltando) toast(faltando + " vídeo(s) não estavam neste aparelho e ficaram fora do arquivo.");
+  return ok;
+}
+/* pacote de distribuição: PDF + pasta Videos com os nomes citados no PDF */
+async function salvarPacote(pdfBlob){
+  var vids = listarVideos();
+  if (!vids.length) return;
+  if (!window.JSZip){ toast("Biblioteca de compactação não carregou. O PDF foi salvo sem os vídeos."); return; }
+  var zip = new JSZip();
+  zip.file(computeReportId() + ".pdf", pdfBlob);
+  var faltando = 0;
+  for (var i = 0; i < vids.length; i++){
+    var b = await getVideoBlob(vids[i].v.id);
+    if (b) zip.file("Videos/" + videoFileName(vids[i].pi, vids[i].vj, vids[i].v), b, { compression: "STORE" });
+    else faltando++;
+  }
+  var out = await zip.generateAsync({ type: "blob", compression: "STORE" });
+  await saveFile(computeReportId().replace(/[()]/g,"").replace(/\s+/g,"_") + "_pacote.zip", out);
+  if (faltando) toast(faltando + " vídeo(s) não estavam neste aparelho e ficaram fora do pacote.");
+}
+
 /* ---------------- validation ---------------- */
 function validateForExport(){
   var errs = [];
@@ -861,24 +1137,49 @@ document.getElementById("btnNovo").addEventListener("click", async function(){
 document.getElementById("btnCarregar").addEventListener("click", function(){
   document.getElementById("fileInput").click();
 });
-document.getElementById("fileInput").addEventListener("change", function(e){
+document.getElementById("fileInput").addEventListener("change", async function(e){
   var file = e.target.files[0];
   e.target.value = "";
   if (!file) return;
-  var reader = new FileReader();
-  reader.onload = function(ev){
-    try{
-      var loaded = JSON.parse(ev.target.result);
-      if (!loaded || typeof loaded !== "object" || !("status" in loaded)) throw new Error("formato inválido");
-      state = Object.assign(defaultState(), loaded);
-      rebindPersonFields();
-      renderAll();
-      toast("Relatório carregado: " + computeReportId());
-    }catch(err){
-      toast("Arquivo inválido. Selecione um relatório exportado por este app.");
+  try{
+    var text, zip = null;
+    if (/\.zip$/i.test(file.name)){
+      if (!window.JSZip){ toast("Biblioteca de compactação não carregou. Verifique a conexão e tente novamente."); return; }
+      zip = await JSZip.loadAsync(file);
+      var jf = zip.file("relatorio.json") || zip.file(/\.json$/i)[0];
+      if (!jf) throw new Error("sem json");
+      text = await jf.async("string");
+    }else{
+      text = await new Promise(function(res, rej){
+        var r = new FileReader(); r.onload = function(ev){ res(ev.target.result); }; r.onerror = rej; r.readAsText(file);
+      });
     }
-  };
-  reader.readAsText(file);
+    var loaded = JSON.parse(text);
+    if (!loaded || typeof loaded !== "object" || !("status" in loaded)) throw new Error("formato inválido");
+    var carregados = 0, ausentes = 0;
+    if (Array.isArray(loaded.pontos)){
+      for (var i = 0; i < loaded.pontos.length; i++){
+        var vs = loaded.pontos[i].videos || [];
+        for (var j = 0; j < vs.length; j++){
+          var ent = zip ? zip.file(new RegExp("^videos/" + vs[j].id + "\\.")) : [];
+          if (ent && ent.length){
+            var raw = await ent[0].async("blob");
+            await putVideoBlob(vs[j].id, new Blob([raw], { type: vs[j].tipo || "video/mp4" }));
+            carregados++;
+          }else if (!(await getVideoBlob(vs[j].id))){ ausentes++; }
+        }
+      }
+    }
+    state = Object.assign(defaultState(), loaded);
+    rebindPersonFields();
+    renderAll();
+    var msg = "Relatório carregado: " + computeReportId();
+    if (carregados) msg += " (" + carregados + " vídeo(s))";
+    if (ausentes) msg += ". Atenção: " + ausentes + " vídeo(s) não vieram no arquivo; para vê-los abra o .zip.";
+    toast(msg);
+  }catch(err){
+    toast("Arquivo inválido. Selecione um relatório exportado por este app (.json ou .zip).");
+  }
 });
 
 /* ---------------- enviar para aprovação ---------------- */
@@ -891,9 +1192,7 @@ document.getElementById("btnExportar").addEventListener("click", async function(
   state.status = "aguardando_aprovacao";
   localSave();
   renderAll();
-  var blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
-  var filename = computeReportId() + ".json";
-  await saveFile(filename, blob);
+  await exportarEstado("");
   toast("Envie este arquivo (WhatsApp/e-mail) para o aprovador abrir neste mesmo app.");
 });
 
@@ -905,14 +1204,12 @@ document.getElementById("btnAprovar").addEventListener("click", async function()
   );
   if (!nomeAprovador) return;
   state.status = "aprovado";
-  state.dataAprovacao = new Date().toISOString();
+  state.dataAprovacao = localStamp();
   state.aprovadoPor = nomeAprovador;
   renderAll();
-  var pdfBlob = await gerarErSalvarPDF();
-  var jsonBlob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
-  var jsonFilename = computeReportId() + "_aprovado.json";
-  await saveFile(jsonFilename, jsonBlob);
-  toast("Relatório aprovado! Envie o PDF e o arquivo .json ao elaborador para a distribuição.");
+  var pdfBlob = await gerarErSalvarPDF({ pacote: false });
+  await exportarEstado("_aprovado");
+  toast("Relatório aprovado! Envie o PDF e o arquivo aprovado (.json ou .zip) ao elaborador para a distribuição.");
 });
 
 /* ---------------- baixar pdf novamente ---------------- */
@@ -933,7 +1230,7 @@ document.getElementById("btnRevisar").addEventListener("click", async function()
 });
 
 /* ---------------- geração de PDF (desenho direto, sem captura de tela) ---------------- */
-async function gerarErSalvarPDF(){
+async function gerarErSalvarPDF(opts){
   if (!window.jspdf){
     toast("Biblioteca de PDF não carregou. Verifique a conexão e tente novamente.");
     return null;
@@ -1022,6 +1319,13 @@ async function gerarErSalvarPDF(){
     }
 
     sectionTitle("Pontos a serem trabalhados");
+    if (listarVideos().length){
+      doc.setFont("helvetica", "italic"); doc.setFontSize(9); doc.setTextColor(100,100,100);
+      doc.splitTextToSize("Os vídeos citados neste relatório acompanham o PDF em arquivos separados (pasta Videos do pacote), com o nome indicado em cada item.", usableW)
+        .forEach(function(l){ checkPageBreak(12); doc.text(l, margin, y + 8); y += 12; });
+      doc.setFont("helvetica", "normal"); doc.setFontSize(10); doc.setTextColor(20,20,20);
+      y += 4;
+    }
     if (!state.pontos.length){
       paragraph("Nenhum ponto registrado.");
     }
@@ -1051,6 +1355,30 @@ async function gerarErSalvarPDF(){
         y += 8;
       });
 
+      (p.videos || []).forEach(function(v, vj){
+        var iw = v.width || 16, ih = v.height || 9;
+        var w = Math.min(usableW, 320), h = w * ih / iw;
+        var maxH = 200;
+        if (h > maxH){ h = maxH; w = h * iw / ih; }
+        var nomeArq = videoFileName(idx, vj, v);
+        var cap = v.legenda ? doc.splitTextToSize(v.legenda, usableW) : [];
+        checkPageBreak(h + 40 + cap.length * 11);
+        var x = margin + (usableW - w) / 2;
+        try{ doc.addImage(v.poster, "JPEG", x, y, w, h); }catch(e){}
+        doc.setDrawColor(150,150,150); doc.setLineWidth(0.5); doc.rect(x, y, w, h);
+        var cx = x + w / 2, cy = y + h / 2;
+        doc.setFillColor(0,0,0); doc.circle(cx, cy, 22, "F");
+        doc.setFillColor(255,255,255); doc.triangle(cx - 7, cy - 11, cx - 7, cy + 11, cx + 13, cy, "F");
+        y += h + 4;
+        doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(60,60,60);
+        doc.text("Vídeo " + (vj + 1) + " do Ponto " + (idx + 1) + " — arquivo: " + nomeArq, margin, y + 7); y += 11;
+        doc.setFont("helvetica", "normal"); doc.setTextColor(100,100,100);
+        doc.text("Duração " + fmtDur(v.duracao) + " · " + fmtMB(v.tamanho || 0), margin, y + 7); y += 11;
+        cap.forEach(function(l){ checkPageBreak(11); doc.text(l, margin, y + 7); y += 11; });
+        doc.setFontSize(10); doc.setTextColor(20,20,20);
+        y += 8;
+      });
+
       var a = p.acao;
       var l1 = doc.splitTextToSize("Ação necessária: " + (a.acaoNecessaria || "—"), usableW - 16);
       var l2 = doc.splitTextToSize("Resultado esperado: " + (a.resultadoEsperado || "—"), usableW - 16);
@@ -1075,7 +1403,7 @@ async function gerarErSalvarPDF(){
     row("Aprovador", [state.aprovador.nome, state.aprovador.cargo, state.aprovador.celular, state.aprovador.email].filter(Boolean).join(" · "));
     row("Status", state.status === "aprovado" ? "Aprovado" : "Aguardando aprovação");
     if (state.dataAprovacao){
-      row("Data da aprovação", formatDateBR(state.dataAprovacao.slice(0,10)) + " às " + state.dataAprovacao.slice(11,16));
+      row("Data da aprovação", fmtStampBR(state.dataAprovacao));
       row("Aprovado por", state.aprovadoPor || "—");
     }
 
@@ -1088,6 +1416,7 @@ async function gerarErSalvarPDF(){
 
     var blob = doc.output("blob");
     await saveFile(computeReportId() + ".pdf", blob);
+    if (!opts || opts.pacote !== false) await salvarPacote(blob);
     return blob;
   }catch(err){
     toast("Não foi possível gerar o PDF.");
